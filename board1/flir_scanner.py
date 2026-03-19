@@ -33,6 +33,21 @@ try:
 except ImportError:
     PYSPIN_AVAILABLE = False
 
+# # --- Face recognition (uncomment when ONNX model is ready) ---
+# import hashlib
+# import onnxruntime as ort
+# from compare_face_fast import load_detectors, detect_and_align_all, extract_feature
+# from driver.face_mjpeg_system import FaceMjpegSystem
+# ONNX_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+#                                 'model', 'face_040.onnx')
+# BITSTREAM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+#                                'bitstream', 'design_1.bit')
+# _ort_session = ort.InferenceSession(ONNX_MODEL_PATH)
+# _face_cascade, _eye_cascade = load_detectors()
+# # _fpga_system = FaceMjpegSystem(BITSTREAM_PATH)  # uncomment on PYNQ board
+# print(f'[FACE] ONNX model loaded: {ONNX_MODEL_PATH}')
+# # --- End face recognition init ---
+
 SIMULATE = '--simulate' in sys.argv or not PYSPIN_AVAILABLE
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -132,6 +147,57 @@ def generate_test_image(frame_number, total, scene_name):
     cv2.putText(img, time.strftime('%Y-%m-%d %H:%M:%S'), (40, 240),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1)
     return img
+
+
+# # --- Face recognition: detect faces, extract embeddings, upload each face ---
+# def process_faces(image_data, image_s3_prefix, frame_index):
+#     """Detect faces in image, name each by embedding hash, upload to S3."""
+#     face_results = detect_and_align_all(image_data, _face_cascade, _eye_cascade)
+#     if not face_results:
+#         print(f'[FACE] Frame {frame_index}: no faces detected')
+#         return []
+#
+#     faces_info = []
+#     for bbox, face_img in face_results:
+#         feat = extract_feature(_ort_session, face_img)
+#         feat = feat / np.linalg.norm(feat)
+#
+#         # Use first 16 hex chars of embedding hash as face ID
+#         emb_bytes = feat.astype(np.float32).tobytes()
+#         face_id = hashlib.sha256(emb_bytes).hexdigest()[:16]
+#
+#         # Encode aligned face as JPEG
+#         _, face_jpeg = cv2.imencode('.jpg', face_img,
+#                                     [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+#
+#         # Upload: <prefix>faces/<face_id>_frame<N>.jpg
+#         s3_key = f'{image_s3_prefix}faces/{face_id}_frame{str(frame_index).zfill(6)}.jpg'
+#         s3.put_object(
+#             Bucket=IMAGE_BUCKET,
+#             Key=s3_key,
+#             Body=face_jpeg.tobytes(),
+#             ContentType='image/jpeg',
+#         )
+#
+#         x, y, w, h = bbox
+#         faces_info.append({
+#             'face_id': face_id,
+#             'bbox': [x, y, w, h],
+#             'embedding': feat.tolist(),
+#             's3_key': s3_key,
+#         })
+#         print(f'[FACE] Frame {frame_index}: face {face_id} bbox=({x},{y},{w},{h}) → s3://{IMAGE_BUCKET}/{s3_key}')
+#
+#     # Upload embedding metadata as JSON
+#     meta_key = f'{image_s3_prefix}faces/frame{str(frame_index).zfill(6)}_meta.json'
+#     s3.put_object(
+#         Bucket=IMAGE_BUCKET,
+#         Key=meta_key,
+#         Body=json.dumps(faces_info).encode(),
+#         ContentType='application/json',
+#     )
+#     return faces_info
+# # --- End face recognition ---
 
 
 def capture_flir_frame(cam, processor):
@@ -251,6 +317,9 @@ def run_scan(command):
                 increment_image_count(session_id)
 
             print(f'[SCANNER] Captured & uploaded frame {i}/{total_images} → s3://{IMAGE_BUCKET}/{s3_key}')
+
+            # # --- Face recognition per frame (uncomment when ONNX model is ready) ---
+            # process_faces(image_data, image_s3_prefix, i)
 
             # Publish progress
             publish_status(scene_id, 'capturing', current_image=i, total_images=total_images)
