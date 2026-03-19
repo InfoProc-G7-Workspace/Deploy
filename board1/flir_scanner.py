@@ -185,6 +185,15 @@ def run_scan(command):
 
         cam = cam_list[0]
         cam.Init()
+
+        # Load UserSet1 from camera
+        nodemap = cam.GetNodeMap()
+        user_set_selector = PySpin.CEnumerationPtr(nodemap.GetNode('UserSetSelector'))
+        user_set_selector.SetIntValue(user_set_selector.GetEntryByName('UserSet1').GetValue())
+        user_set_load = PySpin.CCommandPtr(nodemap.GetNode('UserSetLoad'))
+        user_set_load.Execute()
+        print('[SCANNER] Loaded UserSet1 from camera')
+
         cam.AcquisitionMode.SetValue(PySpin.AcquisitionMode_SingleFrame)
 
     try:
