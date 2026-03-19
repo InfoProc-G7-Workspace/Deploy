@@ -144,7 +144,9 @@ def capture_flir_frame(cam):
         cam.EndAcquisition()
         return None
 
-    image_data = image_result.GetNDArray()
+    # Convert to BGR8 so OpenCV can handle it correctly
+    image_converted = image_result.Convert(PySpin.PixelFormat_BGR8, PySpin.HQ_LINEAR)
+    image_data = image_converted.GetNDArray()
     image_result.Release()
     cam.EndAcquisition()
     return image_data
@@ -186,13 +188,30 @@ def run_scan(command):
         cam = cam_list[0]
         cam.Init()
 
-        # Load UserSet1 from camera
         nodemap = cam.GetNodeMap()
-        user_set_selector = PySpin.CEnumerationPtr(nodemap.GetNode('UserSetSelector'))
-        user_set_selector.SetIntValue(user_set_selector.GetEntryByName('UserSet1').GetValue())
-        user_set_load = PySpin.CCommandPtr(nodemap.GetNode('UserSetLoad'))
-        user_set_load.Execute()
-        print('[SCANNER] Loaded UserSet1 from camera')
+
+        # Set pixel format to BayerRG8 (camera native) — conversion to BGR8
+        # happens in capture_flir_frame via PySpin's image processor
+        try:
+            pixel_format = PySpin.CEnumerationPtr(nodemap.GetNode('PixelFormat'))
+            if PySpin.IsAvailable(pixel_format) and PySpin.IsWritable(pixel_format):
+                entry = pixel_format.GetEntryByName('BayerRG8')
+                if PySpin.IsAvailable(entry):
+                    pixel_format.SetIntValue(entry.GetValue())
+                    print('[SCANNER] Pixel format set to BayerRG8')
+        except PySpin.SpinnakerException as e:
+            print(f'[SCANNER] WARNING: Could not set pixel format: {e}')
+
+        # Enable auto white balance for correct color
+        try:
+            balance_white_auto = PySpin.CEnumerationPtr(nodemap.GetNode('BalanceWhiteAuto'))
+            if PySpin.IsAvailable(balance_white_auto) and PySpin.IsWritable(balance_white_auto):
+                entry = balance_white_auto.GetEntryByName('Continuous')
+                if PySpin.IsAvailable(entry):
+                    balance_white_auto.SetIntValue(entry.GetValue())
+                    print('[SCANNER] Balance White Auto set to Continuous')
+        except PySpin.SpinnakerException as e:
+            print(f'[SCANNER] WARNING: Could not set white balance: {e}')
 
         cam.AcquisitionMode.SetValue(PySpin.AcquisitionMode_SingleFrame)
 
