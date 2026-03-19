@@ -134,7 +134,7 @@ def generate_test_image(frame_number, total, scene_name):
     return img
 
 
-def capture_flir_frame(cam):
+def capture_flir_frame(cam, processor):
     """Capture a single frame from a FLIR camera via PySpin."""
     cam.BeginAcquisition()
     image_result = cam.GetNextImage()
@@ -144,8 +144,8 @@ def capture_flir_frame(cam):
         cam.EndAcquisition()
         return None
 
-    # Convert to BGR8 so OpenCV can handle it correctly
-    image_converted = image_result.Convert(PySpin.PixelFormat_BGR8, PySpin.HQ_LINEAR)
+    # Convert Bayer to BGR8 using ImageProcessor
+    image_converted = processor.Convert(image_result, PySpin.PixelFormat_BGR8)
     image_data = image_converted.GetNDArray()
     image_result.Release()
     cam.EndAcquisition()
@@ -215,6 +215,10 @@ def run_scan(command):
 
         cam.AcquisitionMode.SetValue(PySpin.AcquisitionMode_SingleFrame)
 
+        # Create image processor for Bayer -> BGR8 conversion
+        processor = PySpin.ImageProcessor()
+        processor.SetColorProcessing(PySpin.HQ_LINEAR)
+
     try:
         for i in range(1, total_images + 1):
             t0 = time.monotonic()
@@ -222,7 +226,7 @@ def run_scan(command):
             if SIMULATE:
                 image_data = generate_test_image(i, total_images, scene_name)
             else:
-                image_data = capture_flir_frame(cam)
+                image_data = capture_flir_frame(cam, processor)
                 if image_data is None:
                     print(f'[SCANNER] WARNING: Frame {i} incomplete, skipping')
                     continue
@@ -267,6 +271,10 @@ def run_scan(command):
         publish_status(scene_id, 'error', message=str(e))
     finally:
         if cam is not None:
+            try:
+                cam.EndAcquisition()
+            except PySpin.SpinnakerException:
+                pass
             cam.DeInit()
             del cam
         if cam_list is not None:
