@@ -19,12 +19,15 @@ import os
 import sys
 import json
 import time
+import uuid
 import threading
 import numpy as np
 import cv2
 import boto3
 from awscrt import mqtt
 from awsiot import mqtt_connection_builder
+from driver.face_mjpeg_system import FaceMjpegSystem
+from compare_face_fast import detect_and_align_all, extract_feature
 
 # Try to import PySpin; fall back to simulation mode if unavailable
 try:
@@ -33,20 +36,19 @@ try:
 except ImportError:
     PYSPIN_AVAILABLE = False
 
-# # --- Face recognition (uncomment when ONNX model is ready) ---
-# import hashlib
+# # --- ONNX inference (uncomment when model is ready) ---
 # import onnxruntime as ort
-# from compare_face_fast import load_detectors, detect_and_align_all, extract_feature
-# from driver.face_mjpeg_system import FaceMjpegSystem
 # ONNX_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 #                                 'model', 'face_040.onnx')
-# BITSTREAM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-#                                'bitstream', 'design_1.bit')
 # _ort_session = ort.InferenceSession(ONNX_MODEL_PATH)
-# _face_cascade, _eye_cascade = load_detectors()
-# # _fpga_system = FaceMjpegSystem(BITSTREAM_PATH)  # uncomment on PYNQ board
 # print(f'[FACE] ONNX model loaded: {ONNX_MODEL_PATH}')
-# # --- End face recognition init ---
+# # --- End ONNX init ---
+
+# --- FPGA face detection (Haar hardware accelerated) ---
+BITSTREAM_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'bitstream', 'design_1.bit')
+_fpga_system = FaceMjpegSystem(BITSTREAM_PATH)
+print(f'[FACE] FPGA Haar loaded: {_fpga_system.num_haar_engines} engines')
 
 SIMULATE = '--simulate' in sys.argv or not PYSPIN_AVAILABLE
 
@@ -149,55 +151,67 @@ def generate_test_image(frame_number, total, scene_name):
     return img
 
 
-# # --- Face recognition: detect faces, extract embeddings, upload each face ---
-# def process_faces(image_data, image_s3_prefix, frame_index):
-#     """Detect faces in image, name each by embedding hash, upload to S3."""
-#     face_results = detect_and_align_all(image_data, _face_cascade, _eye_cascade)
-#     if not face_results:
-#         print(f'[FACE] Frame {frame_index}: no faces detected')
-#         return []
-#
-#     faces_info = []
-#     for bbox, face_img in face_results:
-#         feat = extract_feature(_ort_session, face_img)
-#         feat = feat / np.linalg.norm(feat)
-#
-#         # Use first 16 hex chars of embedding hash as face ID
-#         emb_bytes = feat.astype(np.float32).tobytes()
-#         face_id = hashlib.sha256(emb_bytes).hexdigest()[:16]
-#
-#         # Encode aligned face as JPEG
-#         _, face_jpeg = cv2.imencode('.jpg', face_img,
-#                                     [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-#
-#         # Upload: <prefix>faces/<face_id>_frame<N>.jpg
-#         s3_key = f'{image_s3_prefix}faces/{face_id}_frame{str(frame_index).zfill(6)}.jpg'
-#         s3.put_object(
-#             Bucket=IMAGE_BUCKET,
-#             Key=s3_key,
-#             Body=face_jpeg.tobytes(),
-#             ContentType='image/jpeg',
-#         )
-#
-#         x, y, w, h = bbox
-#         faces_info.append({
-#             'face_id': face_id,
-#             'bbox': [x, y, w, h],
-#             'embedding': feat.tolist(),
-#             's3_key': s3_key,
-#         })
-#         print(f'[FACE] Frame {frame_index}: face {face_id} bbox=({x},{y},{w},{h}) → s3://{IMAGE_BUCKET}/{s3_key}')
-#
-#     # Upload embedding metadata as JSON
-#     meta_key = f'{image_s3_prefix}faces/frame{str(frame_index).zfill(6)}_meta.json'
-#     s3.put_object(
-#         Bucket=IMAGE_BUCKET,
-#         Key=meta_key,
-#         Body=json.dumps(faces_info).encode(),
-#         ContentType='application/json',
-#     )
-#     return faces_info
-# # --- End face recognition ---
+def process_faces(image_data, image_s3_prefix, frame_index):
+    """Detect faces via FPGA Haar, crop, UUID-name, upload to S3."""
+    face_results = detect_and_align_all(image_data, _fpga_system)
+    if not face_results:
+        print(f'[FACE] Frame {frame_index}: no faces detected')
+        return []
+
+    faces_info = []
+    for bbox, face_img in face_results:
+        face_id = str(uuid.uuid4())
+
+        # # --- Embedding extraction (uncomment when ONNX model is ready) ---
+        # feat = extract_feature(_ort_session, face_img)
+        # feat = feat / np.linalg.norm(feat)
+        # embedding_list = feat.tolist()
+        # # --- End embedding ---
+        embedding_list = []
+
+        # Encode aligned face as JPEG
+        _, face_jpeg = cv2.imencode('.jpg', face_img,
+                                    [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+
+        # Upload: <prefix>faces/<uuid>.jpg
+        s3_key = f'{image_s3_prefix}faces/{face_id}.jpg'
+        s3.put_object(
+            Bucket=IMAGE_BUCKET,
+            Key=s3_key,
+            Body=face_jpeg.tobytes(),
+            ContentType='image/jpeg',
+        )
+
+        x, y, w, h = bbox
+        faces_info.append({
+            'face_id': face_id,
+            'bbox': [x, y, w, h],
+            'embedding': embedding_list,
+            's3_key': s3_key,
+        })
+        print(f'[FACE] Frame {frame_index}: {face_id} bbox=({x},{y},{w},{h}) → s3://{IMAGE_BUCKET}/{s3_key}')
+
+    # Upload metadata JSON
+    meta_key = f'{image_s3_prefix}faces/frame{str(frame_index).zfill(6)}_meta.json'
+    s3.put_object(
+        Bucket=IMAGE_BUCKET,
+        Key=meta_key,
+        Body=json.dumps(faces_info).encode(),
+        ContentType='application/json',
+    )
+
+    # Publish face detection result via MQTT
+    _connection.publish(
+        topic='robot/scan/faces',
+        payload=json.dumps({
+            'scene_id': '',
+            'frame': frame_index,
+            'faces': [{'face_id': f['face_id'], 'bbox': f['bbox'],
+                        's3_key': f['s3_key']} for f in faces_info],
+        }),
+        qos=mqtt.QoS.AT_LEAST_ONCE,
+    )
+    return faces_info
 
 
 def capture_flir_frame(cam, processor):
@@ -318,8 +332,8 @@ def run_scan(command):
 
             print(f'[SCANNER] Captured & uploaded frame {i}/{total_images} → s3://{IMAGE_BUCKET}/{s3_key}')
 
-            # # --- Face recognition per frame (uncomment when ONNX model is ready) ---
-            # process_faces(image_data, image_s3_prefix, i)
+            # Face detection (FPGA Haar) + upload per frame
+            process_faces(image_data, image_s3_prefix, i)
 
             # Publish progress
             publish_status(scene_id, 'capturing', current_image=i, total_images=total_images)
