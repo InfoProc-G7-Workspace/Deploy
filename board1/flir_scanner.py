@@ -217,7 +217,7 @@ def run_scan(command):
 
         # Create image processor for Bayer -> BGR8 conversion
         processor = PySpin.ImageProcessor()
-        processor.SetColorProcessing(PySpin.HQ_LINEAR)
+        processor.SetColorProcessing(PySpin.SPINNAKER_COLOR_PROCESSING_ALGORITHM_HQ_LINEAR)
 
     try:
         for i in range(1, total_images + 1):
